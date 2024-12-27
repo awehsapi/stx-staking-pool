@@ -184,3 +184,56 @@
     )
     (/ (* balance tier) u100)) ;; Vote power = balance * tier / 100
 )
+
+
+;; Price Oracle Integration
+(define-public (update-price (new-price uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set last-price new-price)
+        (ok new-price))
+)
+
+;; Enhanced reward calculation with tiers
+(define-public (calculate-rewards (staker principal))
+    (let (
+        (staker-balance (get-staker-balance staker))
+        (staker-tier (default-to u1 (map-get? staker-tiers staker)))
+        (tier-multiplier (get-tier-multiplier staker-tier))
+        (total (var-get total-staked))
+        (cycle-rewards (default-to u0 (map-get? reward-distribution (- (var-get reward-cycle) u1))))
+    )
+    (if (is-eq total u0)
+        (ok u0)
+        (ok (/ (* (* staker-balance cycle-rewards) tier-multiplier) (* total u1000))))
+))
+
+(define-private (get-tier-multiplier (tier uint))
+    (if (is-eq tier u3)
+        tier-3-multiplier
+        (if (is-eq tier u2)
+            tier-2-multiplier
+            tier-1-multiplier))
+)
+
+;; Emergency functions with timelock
+(define-data-var emergency-timelock uint u0)
+(define-constant timelock-delay u144) ;; ~24 hours in blocks
+
+(define-public (initiate-emergency-withdrawal)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set emergency-timelock (+ stacks-block-height timelock-delay))
+        (ok stacks-block-height))
+)
+
+(define-public (execute-emergency-withdrawal)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (>= stacks-block-height (var-get emergency-timelock)) (err u110))
+        (let (
+            (balance (stx-get-balance (as-contract tx-sender)))
+        )
+        (try! (as-contract (stx-transfer? balance (as-contract tx-sender) contract-owner)))
+        (ok balance)))
+)
