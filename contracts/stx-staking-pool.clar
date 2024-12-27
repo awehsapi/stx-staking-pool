@@ -91,3 +91,96 @@
 
     (ok amount))
 )
+
+
+;; Tiered unstaking with cooldown
+(define-public (unstake (amount uint))
+    (let (
+        (current-balance (get-staker-balance tx-sender))
+        (last-unstake (default-to u0 (map-get? last-unstake-block tx-sender)))
+        (current-block stacks-block-height)
+    )
+    (asserts! (>= current-balance amount) err-insufficient-funds)
+    (asserts! (>= (- current-block last-unstake) unstake-cooldown-blocks) err-cooldown-active)
+
+    ;; Transfer STX back to staker
+    (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
+
+    ;; Update staker's balance and record unstake block
+    (map-set staker-balances tx-sender (- current-balance amount))
+    (map-set last-unstake-block tx-sender current-block)
+
+    ;; Update total staked amount
+    (var-set total-staked (- (var-get total-staked) amount))
+
+    (ok amount))
+)
+
+;; Governance System
+(define-public (create-proposal (description (string-utf8 256)))
+    (let (
+        (proposal-id (var-get governance-proposal-id))
+        (start-block stacks-block-height)
+        (end-block (+ start-block governance-voting-period))
+        (staker-balance (get-staker-balance tx-sender))
+    )
+    (asserts! (>= staker-balance tier-2-minimum) (err u109))
+
+    ;; Create new proposal
+    (map-set governance-proposals proposal-id {
+        proposer: tx-sender,
+        start-block: start-block,
+        end-block: end-block,
+        description: description,
+        active: true
+    })
+
+    ;; Initialize vote counts
+    (map-set governance-vote-counts proposal-id {yes: u0, no: u0})
+
+    ;; Increment proposal ID
+    (var-set governance-proposal-id (+ proposal-id u1))
+
+    (ok proposal-id))
+)
+
+(define-public (vote (proposal-id uint) (vote-bool bool))
+    (let (
+        (proposal (unwrap! (map-get? governance-proposals proposal-id) err-proposal-not-active))
+        (vote-power (get-vote-power tx-sender))
+        (current-votes (default-to {yes: u0, no: u0} (map-get? governance-vote-counts proposal-id)))
+    )
+    (asserts! (not (default-to false (map-get? governance-votes {proposal: proposal-id, voter: tx-sender}))) err-already-voted)
+    (asserts! (and (>= stacks-block-height (get start-block proposal)) (<= stacks-block-height (get end-block proposal))) err-proposal-not-active)
+
+    ;; Record vote
+    (map-set governance-votes {proposal: proposal-id, voter: tx-sender} vote-bool)
+
+    ;; Update vote counts
+    (if vote-bool
+        (map-set governance-vote-counts proposal-id 
+            {yes: (+ (get yes current-votes) vote-power), 
+             no: (get no current-votes)})
+        (map-set governance-vote-counts proposal-id 
+            {yes: (get yes current-votes), 
+             no: (+ (get no current-votes) vote-power)}))
+
+    (ok true))
+)
+
+;; Helper functions
+(define-private (determine-tier (balance uint))
+    (if (>= balance tier-3-minimum)
+        u3
+        (if (>= balance tier-2-minimum)
+            u2
+            u1))
+)
+
+(define-private (get-vote-power (staker principal))
+    (let (
+        (balance (get-staker-balance staker))
+        (tier (default-to u1 (map-get? staker-tiers staker)))
+    )
+    (/ (* balance tier) u100)) ;; Vote power = balance * tier / 100
+)
